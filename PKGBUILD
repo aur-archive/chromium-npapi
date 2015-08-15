@@ -1,0 +1,209 @@
+# Maintainer: mareex <marcus dot behrendt dot 86 at gmail dot com>
+# Based on the chromium package in Extra
+
+_pkgname=chromium
+pkgname=${_pkgname}-npapi
+pkgver=40.0.2214.93
+pkgrel=1
+pkgdesc="Chromium with NPAPI reenabled (Michael Müller patches)"
+arch=('i686' 'x86_64')
+url="http://www.chromium.org/"
+license=('BSD')
+depends=('gtk2' 'nss' 'alsa-lib' 'xdg-utils' 'bzip2' 'libevent' 'libxss' 'icu'
+         'libexif' 'libgcrypt' 'ttf-font' 'systemd' 'dbus' 'flac' 'snappy'
+         'speech-dispatcher' 'pciutils' 'libpulse' 'harfbuzz'
+         'desktop-file-utils' 'hicolor-icon-theme')
+makedepends=('python2' 'perl' 'gperf' 'yasm' 'mesa' 'libgnome-keyring'
+             'elfutils' 'subversion' 'ninja' 'clang')
+[[ $CARCH = x86_64 ]] && makedepends+=('lib32-gcc-libs' 'lib32-zlib')
+optdepends=('kdebase-kdialog: needed for file dialogs in KDE'
+            'gnome-keyring: for storing passwords in GNOME keyring'
+            'libgnome-keyring: for storing passwords in GNOME keyring'
+            'kdeutils-kwalletmanager: for storing passwords in KWallet')
+backup=('etc/chromium/default')
+conflicts=('chromium' 'chromium-libpdf')
+provides=('chromium')
+options=('!strip')
+install=chromium.install
+source=(https://commondatastorage.googleapis.com/chromium-browser-official/$_pkgname-$pkgver.tar.xz
+        chromium.desktop
+        chromium.default
+        chromium.sh
+        chromium-webkit-buffer-overflow.patch
+        0001-Revert-Linux-Remove-some-unused-NPAPI-code.patch
+        0002-Reenable-the-plugin-command-switch-and-process-again.patch
+        0003-Enable-loading-of-NPAPI-plugins-again.patch
+        0004-Add-code-to-properly-initialize-a-NPAPI-plugin-with-.patch)
+sha256sums=('c4937596bc02d346a89543a6b5bd0fab9f45e34f3ce20dee94dc132a95c990de'
+            '09bfac44104f4ccda4c228053f689c947b3e97da9a4ab6fa34ce061ee83d0322'
+            '478340d5760a9bd6c549e19b1b5d1c5b4933ebf5f8cfb2b3e2d70d07443fe232'
+            '4999fded897af692f4974f0a3e3bbb215193519918a1fa9b31ed51e74a2dccb9'
+            '870ca4516a0a5407b1e2da822a1ca4f201349c8699877f6bd248cd8e08e7f2f1'
+            '4f4980a059369f63c45bae866e6102ad2cbfd00226227b518710d25620a600c5'
+            '4da74f3327c65bb69a13c25c4d2372b2d69659b7c75290180cf531da86fb2ec2'
+            'b04e734801c1557b7e846a4819fa9c6a6f93308dd3f65bc3d0c76a01ef7c3af6'
+            'eed3da7fb06ff02fa0604c0a706a53569b15fd38c5bc025585fd06cf8ef36ca3')
+
+# Google API keys (see http://www.chromium.org/developers/how-tos/api-keys)
+# Note: These are for Arch Linux use ONLY. For your own distribution, please
+# get your own set of keys. Feel free to contact foutrelis@archlinux.org for
+# more information.
+_google_api_key=AIzaSyDwr302FpOSkGRpLlUpPThNTDPbXcIn_FM
+_google_default_client_id=413772536636.apps.googleusercontent.com
+_google_default_client_secret=0ZChLK6AxeA3Isu96MkwqDR4
+
+# We can't build (P)NaCL on i686 because the toolchain is x86_64 only and the
+# instructions to build the toolchain from source don't work that well (at least
+# from within the Chromium 39 source tree).
+# https://sites.google.com/a/chromium.org/dev/nativeclient/pnacl/building-pnacl-components-for-distribution-packagers
+_build_nacl=1
+if [[ $CARCH == i686 ]]; then
+  _build_nacl=0
+fi
+
+prepare() {
+  cd "$srcdir/$_pkgname-$pkgver"
+
+  patch -Np1 -i ../0001-Revert-Linux-Remove-some-unused-NPAPI-code.patch
+  patch -Np1 -i ../0002-Reenable-the-plugin-command-switch-and-process-again.patch
+  patch -Np1 -i ../0003-Enable-loading-of-NPAPI-plugins-again.patch
+  patch -Np1 -i ../0004-Add-code-to-properly-initialize-a-NPAPI-plugin-with-.patch
+
+  # Remove bundled ICU; its header files appear to get picked up instead of
+  # the system ones, leading to errors during the final link stage
+  # https://groups.google.com/a/chromium.org/d/topic/chromium-packagers/BNGvJc08B6Q
+  find third_party/icu -type f \! -regex '.*\.\(gyp\|gypi\|isolate\)' -delete
+
+  # Fix a buffer overflow in blink::HarfBuzzShaper::resolveCandidateRuns()
+  # https://code.google.com/p/chromium/issues/detail?id=445075#c10
+  patch -d third_party/WebKit -Np1 <../chromium-webkit-buffer-overflow.patch
+
+  # Use Python 2
+  find . -name '*.py' -exec sed -i -r 's|/usr/bin/python$|&2|g' {} +
+  # There are still a lot of relative calls which need a workaround
+  mkdir "$srcdir/python2-path"
+  ln -s /usr/bin/python2 "$srcdir/python2-path/python"
+
+  # Download the PNaCL toolchain on x86_64; i686 toolchain is no longer provided
+  if (( $_build_nacl )); then
+    python2 build/download_nacl_toolchains.py \
+      --packages nacl_x86_newlib,pnacl_newlib,pnacl_translator
+  fi
+}
+
+build() {
+  cd "$srcdir/$_pkgname-$pkgver"
+
+  export PATH="$srcdir/python2-path:$PATH"
+
+  # CFLAGS are passed through release_extra_cflags below
+  export -n CFLAGS CXXFLAGS
+
+  local _chromium_conf=(
+    -Dgoogle_api_key=$_google_api_key
+    -Dgoogle_default_client_id=$_google_default_client_id
+    -Dgoogle_default_client_secret=$_google_default_client_secret
+    -Dwerror=
+    -Dclang=0
+    -Dpython_ver=2.7
+    -Dlinux_link_gsettings=1
+    -Dlinux_link_libpci=1
+    -Dlinux_link_libspeechd=1
+    -Dlinux_link_pulseaudio=1
+    -Dlinux_strip_binary=1
+    -Dlinux_use_bundled_binutils=0
+    -Dlinux_use_bundled_gold=0
+    -Dlinux_use_gold_flags=0
+    -Dicu_use_data_file_flag=0
+    -Dlogging_like_official_build=1
+    -Drelease_extra_cflags="$CFLAGS"
+    -Dlibspeechd_h_prefix=speech-dispatcher/
+    -Dffmpeg_branding=Chrome
+    -Dproprietary_codecs=1
+    -Duse_system_bzip2=1
+    -Duse_system_flac=1
+    -Duse_system_ffmpeg=0
+    -Duse_system_harfbuzz=1
+    -Duse_system_icu=1
+    -Duse_system_libevent=1
+    -Duse_system_libjpeg=1
+    -Duse_system_libpng=1
+    -Duse_system_libxml=0
+    -Duse_system_snappy=1
+    -Duse_system_ssl=0
+    -Duse_system_xdg_utils=1
+    -Duse_system_yasm=1
+    -Duse_system_zlib=0
+    -Dusb_ids_path=/usr/share/hwdata/usb.ids
+    -Duse_mojo=0
+    -Duse_gconf=0
+    -Ddisable_fatal_linker_warnings=1
+    -Ddisable_glibc=1)
+
+  if (( ! $_build_nacl )); then
+    _chromium_conf+=(
+      -Ddisable_nacl=1
+      -Ddisable_pnacl=1
+    )
+  fi
+
+  build/linux/unbundle/replace_gyp_files.py "${_chromium_conf[@]}"
+  build/gyp_chromium --depth=. "${_chromium_conf[@]}"
+
+  ninja -C out/Release chrome chrome_sandbox chromedriver
+}
+
+package() {
+  cd "$srcdir/$_pkgname-$pkgver"
+
+  install -D out/Release/chrome "$pkgdir/usr/lib/chromium/chromium"
+
+  install -Dm4755 -o root -g root out/Release/chrome_sandbox \
+    "$pkgdir/usr/lib/chromium/chrome-sandbox"
+
+  install -D out/Release/chromedriver "$pkgdir/usr/lib/chromium/chromedriver"
+
+  cp out/Release/{*.pak,libffmpegsumo.so,libpdf.so} "$pkgdir/usr/lib/chromium/"
+
+  if (( $_build_nacl )); then
+    cp out/Release/nacl_helper{,_bootstrap} out/Release/nacl_irt_*.nexe \
+      "$pkgdir/usr/lib/chromium/"
+  fi
+
+  # Manually strip binaries so that 'nacl_irt_*.nexe' is left intact
+  strip $STRIP_BINARIES "$pkgdir/usr/lib/chromium/"{chromium,chrome-sandbox} \
+    "$pkgdir/usr/lib/chromium/chromedriver"
+  strip $STRIP_SHARED "$pkgdir/usr/lib/chromium/libffmpegsumo.so" \
+    "$pkgdir/usr/lib/chromium/libpdf.so"
+
+  if (( $_build_nacl )); then
+    strip $STRIP_BINARIES "$pkgdir/usr/lib/chromium/"nacl_helper{,_bootstrap}
+  fi
+
+  # Allow users to override command-line options
+  install -Dm644 "$srcdir/chromium.default" "$pkgdir/etc/chromium/default"
+
+  cp -a out/Release/locales "$pkgdir/usr/lib/chromium/"
+
+  install -Dm644 out/Release/chrome.1 "$pkgdir/usr/share/man/man1/chromium.1"
+
+  install -Dm644 "$srcdir/chromium.desktop" \
+    "$pkgdir/usr/share/applications/chromium.desktop"
+
+  for size in 22 24 48 64 128 256; do
+    install -Dm644 "chrome/app/theme/chromium/product_logo_$size.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/chromium.png"
+  done
+
+  for size in 16 32; do
+    install -Dm644 "chrome/app/theme/default_100_percent/chromium/product_logo_$size.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/chromium.png"
+  done
+
+  install -D "$srcdir/chromium.sh" "$pkgdir/usr/bin/chromium"
+  ln -s /usr/lib/chromium/chromedriver "$pkgdir/usr/bin/chromedriver"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+# vim:set ts=2 sw=2 et:
